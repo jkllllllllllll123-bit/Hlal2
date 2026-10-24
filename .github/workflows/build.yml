@@ -13,323 +13,124 @@ jobs:
           gradle-version: "8.9"
       - name: Write project
         run: |
-          mkdir -p app/src/main/java/com/halalscan/app app/src/main/res/xml
-          cat > settings.gradle.kts <<'EOF'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "HalalScan"
-          include(":app")
-          EOF
-          cat > build.gradle.kts <<'EOF'
-          plugins {
-              id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-          }
-          EOF
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          org.gradle.jvmargs=-Xmx2g
-          EOF
-          cat > app/build.gradle.kts <<'EOF'
-          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
-          android {
-              namespace = "com.halalscan.app"
-              compileSdk = 34
-              defaultConfig { applicationId = "com.halalscan.app"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
-              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-              kotlinOptions { jvmTarget = "17" }
-          }
-          dependencies {
-              implementation("androidx.core:core-ktx:1.13.1")
-              implementation("androidx.appcompat:appcompat:1.7.0")
-          }
-          EOF
-          cat > app/src/main/AndroidManifest.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <uses-permission android:name="android.permission.INTERNET"/>
-              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
-              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-              <application android:label="حلال سكان" android:theme="@style/Theme.AppCompat.Light.NoActionBar" android:allowBackup="false">
-                  <activity android:name=".MainActivity" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
-                      </intent-filter>
-                  </activity>
-                  <service android:name=".BubbleService" android:exported="false" android:foregroundServiceType="mediaProjection"/>
-                  <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fp" android:exported="false" android:grantUriPermissions="true">
-                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/paths"/>
-                  </provider>
-              </application>
-          </manifest>
-          EOF
-          cat > app/src/main/res/xml/paths.xml <<'EOF'
-          <?xml version="1.0" encoding="utf-8"?><paths><cache-path name="c" path="."/></paths>
-          EOF
-          cat > app/src/main/java/com/halalscan/app/Gemini.kt <<'EOF'
-          package com.halalscan.app
-
-          import android.content.Context
-          import android.graphics.Bitmap
-          import android.util.Base64
-          import org.json.JSONArray
-          import org.json.JSONObject
-          import java.io.ByteArrayOutputStream
-          import java.net.HttpURLConnection
-          import java.net.URL
-
-          fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
-
-          object Gemini {
-              private const val PROMPT = """أنت خبير في الأطعمة الحلال لمسلمين يعيشون في أوروبا. الصورة قد تكون لقطة شاشة (منشور، متجر، قائمة طعام، إعلان) أو صورة منتج أو ملصق مكونات. حدد المنتج أو الأكلة أو المشروب الظاهر واحكم على حلاله من مكوناته.
-          قواعد: حرام: لحم الخنزير والشحم والبيكون، الكحول كمكوّن (إيثانول، نبيذ، بيرة، رم)، الجيلاتين E441 إلا لو بقري/سمك حلال معتمد، الكارمين E120، إل-سيستين E920 من الشعر والريش، الدم. مشبوه: E471 E472 E477 E470 E481 E482 (مصدر مجهول)، E422 جليسرول، E631 E627 E635، المنفحة والإنزيمات، النكهات الطبيعية بحامل كحولي، الجبن بمنفحة حيوانية، لحوم ودجاج غير معتمدة في أوروبا، خلاصة الفانيلا بالكحول. حلال: نباتي بالكامل، السمك، وما عليه شعار حلال معتمد.
-          إن لم تظهر المكونات ولا تستطيع التأكد فاختر unknown أو mashbooh واطلب تصوير ملصق المكونات. لا تخمّن بثقة. اختصر.
-          أجب بـ JSON فقط: {"product":"الاسم","verdict":"halal|haram|mashbooh|unknown","confidence":0-100,"summary":"جملتان","flagged":[{"name":"مكوّن","status":"halal|haram|mashbooh","reason":"سبب قصير"}],"tip":"نصيحة أو بديل"} والنصوص بالعربية."""
-
-              private fun scaled(b: Bitmap): Bitmap {
-                  val m = 1280f / maxOf(b.width, b.height)
-                  return if (m >= 1f) b else Bitmap.createScaledBitmap(b, (b.width * m).toInt(), (b.height * m).toInt(), true)
-              }
-
-              fun analyze(key: String, model: String, bmp: Bitmap): JSONObject {
-                  val s = ByteArrayOutputStream()
-                  scaled(bmp).compress(Bitmap.CompressFormat.JPEG, 85, s)
-                  val b64 = Base64.encodeToString(s.toByteArray(), Base64.NO_WRAP)
-                  val body = JSONObject()
-                      .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
-                          .put(JSONObject().put("text", PROMPT))
-                          .put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64))))))
-                      .put("generationConfig", JSONObject().put("response_mime_type", "application/json"))
-                  val c = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key).openConnection() as HttpURLConnection
-                  c.requestMethod = "POST"
-                  c.setRequestProperty("Content-Type", "application/json")
-                  c.doOutput = true; c.connectTimeout = 20000; c.readTimeout = 60000
-                  c.outputStream.use { it.write(body.toString().toByteArray()) }
-                  val code = c.responseCode
-                  val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
-                  if (code !in 200..299) throw Exception("HTTP " + code + ": " + txt.take(160))
-                  val t = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
-                      .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-                  return JSONObject(t.trim().removePrefix("```json").removeSuffix("```").trim())
-              }
-
-              fun verdict(v: String): Pair<String, Int> = when (v) {
-                  "halal" -> Pair("حلال ✅", 0xFF0F7A55.toInt())
-                  "haram" -> Pair("حرام ⛔", 0xFFC62F2F.toInt())
-                  "mashbooh" -> Pair("مشبوه ⚠️", 0xFFC98A0B.toInt())
-                  else -> Pair("غير واضح ❔", 0xFF6B7A73.toInt())
-              }
-
-              fun body(r: JSONObject): String {
-                  val sb = StringBuilder()
-                  sb.append(r.optString("product")).append("  (").append(r.optInt("confidence")).append("% ثقة)\n\n").append(r.optString("summary"))
-                  val f = r.optJSONArray("flagged")
-                  if (f != null && f.length() > 0) {
-                      sb.append("\n\nالمكونات المهمة:")
-                      for (i in 0 until f.length()) {
-                          val o = f.getJSONObject(i)
-                          sb.append("\n• ").append(o.optString("name")).append(" — ").append(o.optString("reason"))
-                      }
-                  }
-                  val t = r.optString("tip")
-                  if (t.isNotBlank()) sb.append("\n\n💡 ").append(t)
-                  return sb.toString()
-              }
-          }
-          EOF
-          cat > app/src/main/java/com/halalscan/app/MainActivity.kt <<'EOF'
-          package com.halalscan.app
-
-          import android.Manifest
-          import android.content.Intent
-          import android.content.SharedPreferences
-          import android.graphics.BitmapFactory
-          import android.graphics.Color
-          import android.graphics.drawable.GradientDrawable
-          import android.media.projection.MediaProjectionManager
-          import android.net.Uri
-          import android.os.Build
-          import android.os.Bundle
-          import android.provider.Settings
-          import android.view.Gravity
-          import android.view.View
-          import android.widget.*
-          import androidx.activity.result.contract.ActivityResultContracts
-          import androidx.appcompat.app.AppCompatActivity
-          import androidx.core.content.ContextCompat
-          import androidx.core.content.FileProvider
-          import java.io.File
-
-          class MainActivity : AppCompatActivity() {
-              private lateinit var prefs: SharedPreferences
-              private lateinit var keyEt: EditText
-              private lateinit var modelEt: EditText
-              private lateinit var verdictTv: TextView
-              private lateinit var bodyTv: TextView
-              private lateinit var prog: ProgressBar
-              private var camUri: Uri? = null
-
-              private val cam = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok -> if (ok) camUri?.let { run(it) } }
-              private val pick = registerForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) run(u) }
-              private val proj = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
-                  val d = r.data
-                  if (r.resultCode == RESULT_OK && d != null) {
-                      save()
-                      val i = Intent(this, BubbleService::class.java).putExtra("code", r.resultCode).putExtra("data", d)
-                      ContextCompat.startForegroundService(this, i)
-                      Toast.makeText(this, "اضغط 🌙 فوق أي تطبيق لفحص الشاشة", Toast.LENGTH_LONG).show()
-                      moveTaskToBack(true)
-                  }
-              }
-
-              private fun btn(t: String, bg: Int, fg: Int, f: () -> Unit) = Button(this).apply {
-                  text = t; textSize = 17f; setTextColor(fg); isAllCaps = false
-                  background = GradientDrawable().apply { setColor(bg); cornerRadius = dp(16).toFloat(); if (bg == Color.WHITE) setStroke(dp(1), 0xFFE4E0D4.toInt()) }
-                  layoutParams = LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(10) }
-                  setOnClickListener { f() }
-              }
-
-              private fun field(hint: String, value: String) = EditText(this).apply {
-                  this.hint = hint; setText(value); setSingleLine(); textSize = 15f
-                  background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(14).toFloat(); setStroke(dp(1), 0xFFE4E0D4.toInt()) }
-                  setPadding(dp(14), dp(12), dp(14), dp(12))
-                  layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
-              }
-
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  prefs = getSharedPreferences("p", 0)
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(36), dp(20), dp(30)) }
-                  val sv = ScrollView(this).apply { setBackgroundColor(0xFFF6F4EE.toInt()); layoutDirection = View.LAYOUT_DIRECTION_RTL; addView(col) }
-                  col.addView(TextView(this).apply { text = "🌙 حلال سكان"; textSize = 28f; setTextColor(0xFF0B5C41.toInt()); setTypeface(typeface, android.graphics.Typeface.BOLD) })
-                  col.addView(TextView(this).apply { text = "افحص أي منتج أو أكلة أو مشروب: حلال أم حرام؟"; textSize = 14f; setTextColor(0xFF6B7A73.toInt()) })
-                  keyEt = field("مفتاح Gemini API (مجاني)", prefs.getString("key", "") ?: "")
-                  modelEt = field("اسم النموذج", prefs.getString("model", "gemini-flash-latest") ?: "gemini-flash-latest")
-                  col.addView(keyEt)
-                  col.addView(TextView(this).apply {
-                      text = "احصل على مفتاح مجاني: aistudio.google.com/apikey"; textSize = 13f; setTextColor(0xFF0F7A55.toInt()); setPadding(0, dp(6), 0, dp(4))
-                      setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))) }
-                  })
-                  col.addView(modelEt)
-                  col.addView(btn("🌙  تشغيل الزر العائم", 0xFF0F7A55.toInt(), Color.WHITE) { startBubble() }.apply { layoutParams = LinearLayout.LayoutParams(-1, dp(64)).apply { topMargin = dp(20) } })
-                  col.addView(btn("📷  صوّر المنتج", Color.WHITE, 0xFF1B2A24.toInt()) { shoot() })
-                  col.addView(btn("🖼️  اختر صورة", Color.WHITE, 0xFF1B2A24.toInt()) { pick.launch("image/*") })
-                  prog = ProgressBar(this).apply { visibility = View.GONE }
-                  col.addView(prog)
-                  verdictTv = TextView(this).apply {
-                      textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE; setPadding(dp(12), dp(10), dp(12), dp(10))
-                      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) }
-                  }
-                  bodyTv = TextView(this).apply { textSize = 15f; setTextColor(0xFF1B2A24.toInt()); setPadding(dp(4), dp(10), dp(4), 0); setLineSpacing(0f, 1.3f) }
-                  col.addView(verdictTv); col.addView(bodyTv)
-                  col.addView(TextView(this).apply { text = "النتائج بالذكاء الاصطناعي وقد تخطئ. للتأكد ابحث عن شعار حلال معتمد أو اسأل مرجعك الشرعي."; textSize = 12f; setTextColor(0xFF6B7A73.toInt()); setPadding(0, dp(24), 0, 0) })
-                  setContentView(sv)
-              }
-
-              private fun save() { prefs.edit().putString("key", keyEt.text.toString().trim()).putString("model", modelEt.text.toString().trim().ifEmpty { "gemini-flash-latest" }).apply() }
-
-              private fun shoot() {
-                  val f = File.createTempFile("shot", ".jpg", cacheDir)
-                  camUri = FileProvider.getUriForFile(this, packageName + ".fp", f)
-                  cam.launch(camUri)
-              }
-
-              private fun startBubble() {
-                  if (keyEt.text.isBlank()) { Toast.makeText(this, "ضع مفتاح Gemini أولاً", Toast.LENGTH_LONG).show(); return }
-                  if (!Settings.canDrawOverlays(this)) {
-                      Toast.makeText(this, "فعّل «العرض فوق التطبيقات» لحلال سكان ثم ارجع", Toast.LENGTH_LONG).show()
-                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))); return
-                  }
-                  if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-                  proj.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
-              }
-
-              private fun run(u: Uri) {
-                  save()
-                  val key = keyEt.text.toString().trim()
-                  if (key.isEmpty()) { Toast.makeText(this, "ضع مفتاح Gemini أولاً", Toast.LENGTH_LONG).show(); return }
-                  prog.visibility = View.VISIBLE; verdictTv.visibility = View.GONE; bodyTv.text = "جاري التحليل…"
-                  Thread {
-                      try {
-                          val o = BitmapFactory.Options().apply { inSampleSize = 2 }
-                          val bmp = contentResolver.openInputStream(u).use { BitmapFactory.decodeStream(it, null, o) }!!
-                          val r = Gemini.analyze(key, modelEt.text.toString().trim(), bmp)
-                          val v = Gemini.verdict(r.optString("verdict"))
-                          runOnUiThread {
-                              prog.visibility = View.GONE
-                              verdictTv.text = v.first
-                              verdictTv.background = GradientDrawable().apply { setColor(v.second); cornerRadius = dp(16).toFloat() }
-                              verdictTv.visibility = View.VISIBLE
-                              bodyTv.text = Gemini.body(r)
-                          }
-                      } catch (e: Exception) {
-                          runOnUiThread { prog.visibility = View.GONE; bodyTv.text = "خطأ: " + e.message }
-                      }
-                  }.start()
-              }
-          }
-          EOF
-          cat > app/src/main/java/com/halalscan/app/BubbleService.kt <<'EOF'
-          package com.halalscan.app
-
-          import android.annotation.SuppressLint
-          import android.app.Notification
-          import android.app.NotificationChannel
-          import android.app.NotificationManager
-          import android.app.Service
-          import android.content.Intent
-          import android.content.pm.ServiceInfo
-          import android.graphics.Bitmap
-          import android.graphics.Color
-          import android.graphics.PixelFormat
-          import android.graphics.drawable.GradientDrawable
-          import android.hardware.display.DisplayManager
-          import android.hardware.display.VirtualDisplay
-          import android.media.ImageReader
-          import android.media.projection.MediaProjection
-          import android.media.projection.MediaProjectionManager
-          import android.os.Build
-          import android.os.Handler
-          import android.os.IBinder
-          import android.os.Looper
-          import android.os.SystemClock
-          import android.view.Gravity
-          import android.view.MotionEvent
-          import android.view.View
-          import android.view.WindowManager
-          import android.widget.Button
-          import android.widget.LinearLayout
-          import android.widget.ScrollView
-          import android.widget.TextView
-          import kotlin.math.abs
-
-          class BubbleService : Service() {
-              private lateinit var wm: WindowManager
-              private var bubble: View? = null
-              private var panel: View? = null
-              private var proj: MediaProjection? = null
-              private var vd: VirtualDisplay? = null
-              private var ir: ImageReader? = null
-              @Volatile private var latest: Bitmap? = null
-              private var lastConv = 0L
-              private val h = Handler(Looper.getMainLooper())
-              private var sw = 0
-              private var sh = 0
-
-              override fun onBind(i: Intent?): IBinder? = null
-
-              @Suppress("DEPRECATION")
-              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
-                  startFg()
-                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  if (proj == null && i != null) {
-                      val d = i.getParcelableExtra<Intent>("data")
-                      if (d != null) {
-                          val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                          proj = mpm.getMediaProjection(i.getIntExtra("code", 0), d)
-                          proj?.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopSelf() } }, h)
-                          setupCapture()
-           
+          base64 -d <<'B64' | tar xz
+          H4sIABIM3WoC/+0923IbR3Z+5le0p5KtmV1wCIBXgaJkkAIleEmCBUDyOtkUdwg0gDEHM7MzA14iq2ptS7aiOJVyspWq3GqTuHYl
+          31dre73a5ClfAbz6B7KfkHO6e66YISmuLTvxdLFAzHT36dPdp8+tTzfUOXXuhV3t+AbVutR57mtJRZ6y/heL8wvhd3xfKpZL5efI
+          8XPPII1cT3Og+ee+m6m8QoaePqRrpeVL5ZWlS4uL8+r88nzp0uLCzHN5+n+f9ke60VX7jtY1qHrguV/X+l9aWMhc/+XS0nOlxfLS
+          crlYLi+VYP3D98XnSPFZrn/HsrzTyp2V/3802caor5suuT1DIOldWepYQ1Uzu46ld1XNtg29o3m6ZUoKOaSOC9+ItKIuqmWJYO4J
+          6WmGS4PaltNXX6HevqMBVPXA8gzd9MFFQZTUS2p5IQ7jTs5xnnlSvxXyvzQl/4vLufx/JvJ/MU3+l+fzpfjdSC71PN3su1+nCnCW
+          /J8vlxLyf35hfj6X/89O/m9rptanQ2p65DZxqG25umc5OgW9gPQtq29QWVklQ+2QmhtQyNEMfOYks8sg7FqOh2/JHXJnpkttanap
+          2TlpUtcyRqg/XKQJBgwHftexXqEdTzW1ISVrRLqhGZrR6mimNKObHWPUpbJUAVVCUnK+9X9R/uf2f27/5+mbSELs245lU8cDdvwN
+          2P/Fpfmk/C8tl3P5/yySb+mPXFrlX3+05jkjOoOGvCCOVw6HmtN312Z/NDwu93O2kMv/XP7//5b/C6VicTlf6N+BBEbT3Ne9B3CG
+          /C8VF5am7P/F5Vz+Pzv7H43wU33/q+dx7t+ZEd/FbgJa666tdZjJjqAHaLa7YLYjcImVgde2btBW9wAKzS+wd13a00aGt2GZPb0P
+          mEUwqXfTYa2SoW5yIOWlVQJT2qeeD3TV33bYsLqISyl4sSP8CSW1KAH6EYQaNjaH4+JaI6dDN+A1YLCvG7p3AlVe1A61WxyIeqvW
+          bNUbO3ulZb/l85UWLfJxDBsEdavNoDDMlhGxiEuFeUz4dsvQNphDhY2MLInBP1Y7lkMr+DF74B1XSmppXi1Jyul1YBA7DOlK+K2k
+          LsO4KPm+TK7/5frfd0v/u7Q0v5iv+u+I/uc6nbkhiPQ54QHY1ky9R11PPR4az0D/Ky8uJPd/FpeLefzHM0mXr8Ik++rQGleEQMuw
+          urrZX5NGXm92Rbp6ZebyUNAEgeKmWxF6w5o08Dy7MjfndgZ0qLmB8ggaxJxmH8w51J3zFcQrTAO5PHKpO2tTZ6i7LBREZFdQW1zz
+          FRI1LKDWd9q15k6tLc1dFELr5Va7tr1X3ao123sv1XeuNV66OLDNRrN2vdm4uXNtr1Vr3qpv1L5KWHvbtWv16t5us/FibaMNeuLF
+          ge82Wu29nUa7vlnfqCKoVgArolEHcAxtnxpr0vijyd3xw8ldMv508gZ8eVMKSngwx9DUC653YtC5Nj6pVdvmyq66pfcHnrpjVTsI
+          dl1zwoqaYVhH61rnYGSvSSzWRxADRwYqHKKeHO+Rug0sqSryQlj02LYcjwLpoZsyAofB0k0PlNvZnm541InnBW1ljh2vrPIy6na1
+          Hgx+DAaMG+1bzsnpUPxS6lb15s7GjVozCevyXAayl+f8EYm8c6lzqIMllRij9dH+PlhPPDNtkPhoBxk9sAr6jjUyu6JO+8QGOEPa
+          1TWxyYr2XgTVy7ZjHeqgG6Z3l1sb8MF7vQmm066oEJn/kTewHB23F9akP7kds+fuqD37HIj3Hc30bjr6bkDfbjoFDKmnzXY1T8uY
+          HndkYxPqZn2rhsvsVv1arbm3W23faIWtAdtiVh8QO/C7OSDvgRsblDl/VMSCmov0CbjlnM8ur3zblahc/8/1/2n9f+kSKGO5/v9d
+          0/9f0Q61OVTdAuca8rW5qCBWD7wLrf9s/b+0XCol9n9h9S/l8V/Pxv8LWpnWp2TKpTozow9RUPoyUfWtwuR7X/TX2b+s3NZAc2h3
+          16E96oB9Qd1kQRDw9kDvuOq67g01exN0INCeMkttWIblZOZ2He1IA8VIve5oXR3avyZeJGswxQejH4Tmo27HNSEetTbVkEk9FZSR
+          5GsLsMe9lNT3Zne6eV+LUFsiDDNZ4FCnR9gJXHqpebfgI5lxpHf7gOD3E++PVV+vVEG/GRkemxwHXqr+6m6y9xvitTsNwPcN47dQ
+          9/erT5WP6YYIlh4L3/jpRaNqpF8SmZOqWyxvZqZjaK5LopyJVMgUQrIifOW2ox+CQk4M+NBN3SOHmgMvac+tkGnSzKxxQE9qXoXU
+          urrXhq5kFxxaXWqcryjY3l2947UPKwQLsgnNLLxvdU/OVxJIq18hMIh9mGwXzLFYUSzR0YZAwxUCH1fJGjFHhjGTKGRgIcgDo0F3
+          wUjZtJw4qcgZlKO2tQO6C90aOVRWYBaIdUBmrxC9R2TrQBFtX1UNysJBR6asezzcM4mArXcOLoTBdcoegJw4AiO//RF5nvdWYQ2P
+          lLRWgQNcqNUWSJOA/KCaKM4wcACDwITAVnAzy1HRWAleI4KOWJ98u2qNNGutm1vtvcYPyfe+B3UC7G/HLB9XO4Shjr3CNnRog7Nm
+          2RvoboHETMZKhS0kFReXotojr3YMHcGNwC6VCiSKSTQbUYbsbry52AJXUa56m0l7UyChx2u2Lc311CHQDBK2KCONH45/O/79+Avy
+          h1+8/Y9k8trk/uR1Mn538oCM3x9/MX40eQDPk7uT18YfjT8n6LQYfwZ1Phu/B7hxkFu1nevtG3tbjZ3riuoOrKPECA2tQ9rW3IO2
+          he4JGQ3KsAAnizvxRdEbmWTfM2VY2y3PAZ5dIPuw0GCIC6QXfKkQYD1AbzdNpOs1GHTPs0zWMUXlZ57C2cNBgzLeKvvW0v+SbVIu
+          91aJSxnzYMJO7vVxG9atGsaGZrtQJDx5hWkfOsCHGrKSck8OWkWYHN4+wgO2a1KnCaVHCLJry6UlRfWsTcPSPIzIRoLc7yMZslrq
+          Szfq7ZqCUKD71gGVsYpSIMXjzc3aQq14bQFq1/miuxMgZ2gn1sjb1RxtiM1s6SbVnC32Ut2K5MmzpQIisbikhBh7lr2tOX3dFAgW
+          o5ABkYa5Abb3wRYuVegM1OjJSvbs9XRqdOWBbkamEFbKiPqPOGE+386aMnirIggoiv+CqZIZJIU9twCWQbGvOJDRuV3sXXzaotOQ
+          On8Lsfl7yomC4rtaF72/MofFpqNUFv/DZ+VicztbzpzXlcScwdJ0HNAA2KRZ5oZDYQbl/QrhutTVKAN0RzZoUWGhEDsm5KEBjAdI
+          CnpZsoFTFJUYU+5YRqIXcRogeGpBbKAnu3ur1mzXN6pbq4lxLBf5uM0v8f/BczE2+Ni8ewhAWx3HMgwU8Im2Aex6QDCcHnA+N5c2
+          F2q1YD5XxZxc0x2uxgJIBKZuVV9u3GzvXas3uXN5r9kGXAFP1hT0PIoNPKp+lq9vJNARnEtiDHracxwj+vJKkqEh5sX1xY2FUgRz
+          LHFi056GskJ8KUxr+H4Zdb2xdQ2wVi6CNiApZAcKlcm9yZsgWD7Ep/v48Qb05z3+NLkHYuXx5P74USXSz3cn9+Bp/Bie7o1/Ee9u
+          aSGtu0vry9Xl+cjCC/FmuiVydcaeJMDmNcDm4fgjcp0OQa0j1d06kaGhD3FsJw8UIF1G3GqfLXEkNQmAwGtJUsjVCv6bCQUdU0hD
+          +AD5U0QfOgLQ7kHXfj3+MA0kq4lA+wyN2R4oDINZ1DVdT7STmpM6IayTTzNXMWkdzhvOGs7AE8D+r0hkrMLxqRANBMKoCyYDP18k
+          NqV0HKP4VM2nUubmcnVxMU6Z/pIustWLi5l/W1DiakWqUHKjqqEsdDL+T63y5XirXnupgAq5amuOS2W2veZW5uZO6YoSYyEZC0FM
+          f3omqjN8CaNi9dn496BY3eX61G/Gj/mXJzC6v5rck7j8iI9NIa4aiJ5yPRMFcbDunlYLWFrI1gLKRWYvnNqjv/8CevQ5qI3viG74
+          S1yKocz7VFovV8sRmQjdGFiWJytnNPIP//U/v/tbaOfh+GMA/Zg1CCzhvfO1geaNamgjszOQJX2o9enc96VYk2jIQZcjllyCmx3q
+          bhhpxtj89cZOLYORI7SIvPNtT6h5zvXnc/Nycs3E9ZI+91lwnYb5HDZquI+7moFuUmIGGkcxoYEUE0vtq9I+SiuxZRTqZ8zizhyf
+          hFqXwkcSc57s6EK8n/hY5IWwKy1b6zCG0yuQkjrfy5LPwUQylTBCowz7iwrHu2y1wMJHofiI8YFfo2gf/ztnCg/Hn4+/gDIPgQ+D
+          /ATzbPwJspCPwTr7lYqm2V14AkGKrx8ChI/GHyDPfpMAl0GO8jgUpsC4n4zfh89PhPwF+QRfWMZj4OlPJm/4Jt5jbE5N8PDyOcRt
+          Cg8vL3AmXoytOTfwHbABcsUIphgT3OrGhczkJgWzQWaWclwiM7mnIr6AjMgCNd3Rh4BWtLgvbQXDzqii6r3a0PZwulKFL/SFzyez
+          g6aRFoztdkzz7MEwonNN7TAluk2HNj7KEhT3UAFQX7H78L+jdQYUVMsIVTFvjqju++1Qh4C3m5bDoHCbXribWdztDwBiDxXwXgyS
+          zw050OyBj8mY2zEHSmS0dXfd0MwDzmwz3Ay/HT8h0+oWUiGjzb8+zZuwShzqjRwzsi4Rg+d9h67a0Uy05hqwQoFVuXyxJX036YgB
+          Rk8m78AS+O8PhAx+PP5t4Ad5yBaXcIMA4u//93/CiptSwsn4A6bm8UV0bsdIqrISdEqoK9vVner12l4DzB6wLPZ2a83teguDm2M6
+          jJjzigQzHpl/RQkGL4Xt4iAyX7ofL622rv1wr77TJlfWyPy8AjV/OgJSj8QDyJrjaCeNnhzEr50aDAPrvhSTsq/4lIfK7wmobUPf
+          Z5W+KRD3nfFFA4YbpeaGZqPjs+57H7NomLkfmQM2ZsvGHXm4NIGgYXWdxkSS9A+EzzjEsyR81C3UafF+q96qr2/VVkNtQ83SAbi4
+          UgMR9CHSLfr7OLEDbaNq+uXPfiUFjbYHMPDdpKLiJFUXfyQtdMZFd5hUEXgfcbXoZkvDOHlf1Yl0MQpqf2hDrtiyYBcdHKIPwqZm
+          3eQcnWpDeaTg2UqAGm+1S9HFKsroXoG5dAvEAn79/POpzTmoS7EZUoH+jJO/pDjPZ0mKAqKppAI8DAGKmZER/UAUiZeSMl0dCLdh
+          3tRTx/4MasCJTi0fUoeY/kO1pzuud0bhp/afHaoujL3ZPdv5mTLv8bYzaT21Xpy4xcjjS9mZHuF403dAMHqdAZFphdSOO5SRrJIy
+          8ImJOW0Splcbqm3vgjkPfJqqQ7A1cGM4gUjIqrmDX/aZW35IJD//ceH4r/np+K9SHv/1TOK/ltPiv5Yv5eFfefyXH/8V2zG+QADY
+          6fFf5RKs92T81/xSfv7jWxb/pZmmxXe91NbIttEXuaVPB3xhYNCO5ek9EQ19Vv7GAABT46xiGYFYWEwQ5sXi0uyhX79u9qwzgtIu
+          GI22qx9TY9NyhlNhTxeIWBtoTvdIc6ja1V3b0E7Ua/x/xgBNFb+lO95IM0St9Hi4Ovqhm0wjeNqAua8owO6USLobGu7+ptWor+tm
+          NzVny8LrjVIyuJ2/YVidg6cOvdu2sAO1wxTqygzNYxkvAZrWUUbPRfAeDxjJyIw6uTOKhDvIGQWCCDKRLU7zA40OVG3f9SPsYryf
+          VIjvEjk1sO5oWCHxTiZjz/YZ2AqzRoLgs2QhWwPGcFYZoKQKSRBVZunDLoKLLoDMorpTIZF1ECv3wi0L+qsbNFaD+14rwtDPBAzD
+          is5ltL6LW1OBZwN4LShc5lSLflSMc+RPvjcpCtE9QljTrwfsdVosBS4UWa+IwLCrCnzjayceCPiCz+hl6Vptt1njnjOxtZsAyQLf
+          NqzhUIuBZrFQLCbKZf8V9hn1drEwsX7Eg3U0FOEaMR8cP7bnH5NTiOamkJjvAOPhe7wrGDSnZwXN+VF4Oo7yruZ0qIFMl4W5XeZd
+          uCLC3eI2OraSGYrnQx7aqV1JHvGLdSqDP6Z4VzBAEVpg9BGvJLPuAPrxaD62xaSkgrqq+qGOG5phoE9FtvYRGplaXGpQgoV1JqnA
+          smW+BWzZLWr0+CWeBTKYbtel3sgWrtKE9/lOhkc4Oq/xVgJ3ZKtdbTJP716rXd/44csJCJzxhDC0btffRAjKZUA6dScCKTixn2Km
+          Tn6KUhNzJAcgzKHwKadoS3LaO2ng4i4NuxuVsMtRCySlNbW+vdtotqs7G7W9rcZLStzTjLuh0UpcDFPH9xlDG4oabo+1dQ93iKZ3
+          HSYPxk8m9yZ3E8smWhU90ckYTz+Yc3Jv/NCP7ogFdrLGW0MgwTqocLIv1JqhAqV39obUHO11tCF1NEVltxslHOSZOwvlSwpJBK7K
+          pQIxCySiJaYd222/vDt9dlch1HBpKsDsfa3YqkiQFI/F5mcTXV+l26aeAypkyFFRHAxRznsDpnq6q1wWgIZP8ZAufxkD7DAhh6HC
+          ochTTXpUNwF5E8jWPQIOPiiQiC6rNq+vV/dWIBVIOTK+DkOSKY9BE8hjcfE+/7wg6rgUFrTrNzJUu9R0Qe+6ZusFEldw1Vv1Zvtm
+          dWvvWr21i7tOm1vV63vVm+3G3na92Ww0C6Jx1R05PHiMu9YH0QXOC2CUDutw9VDTGeP3w3XkRLR2EE097LOYba3z05Hu0C0m8hkI
+          mYVCcdbxwimQz7lPYVo4ixH1VB3Z6KfZ1g1Dd+VpbopkjZVmQwXjCikvFpUM93xEDYFq6Y5uDITHYEjotQpTYFL3z4t/kVkUEbYN
+          1bGOcAcBRMIcPtpIMPxFZs0eiml/X0YQCH+QBUWILH4llFoFymOEp6SCRHBg4NknnNA3HWu4Pur1YFYBn332TckYE5xO7DAM5hEK
+          CfdI4dixhZyGYI8RV5H9cfpVVLCiLYxCRjwc2jnp8DioM538Pd0Exsa2oGDEO4blxuuFcvROQkFDS1yWWMQZEhuqzNUO8Ajf8S8p
+          U4wmIvkSXMZ7inAgP/ozEeu51DstBIga9NCPny2VezGg597PGWg2TSmiNm6J+NvTQ/nCoOj5ZABbmvaB42Lgfl9M6YxHGGHc+goP
+          42H/s4uqTFxUd3e3xG60v4deiI3FKQAY10PdZLOxcbNVXd+qxXlzu1ndaW3dxBFPn7zp2Wk3donlBI9M/VklxwRXAbAV6NUyRiZh
+          FRAnc2Q+dZjA7sAqxVX+/ST87rH3PfFwEnnAUxjdqQMN3iHn0G1r1BlE4ij3CoQmefPRgJpEpuLuhjSeF7HW/fAFsCd28JDGbY6y
+          YavHqxxj+HqyyhGmKhDWj1Y5wuzh5dU4wpDnjGjK8k5pchvmmTWZyQu72KjMW4VR944Vn25Xef5JkP8y5p8E+akgkZOBOS93jxWQ
+          B6UiefVVwp5P+LMS9IXd+pvKFWFccM6PyQ8Au1U2OPh8gs8wTEdDkE1dJtPpkR8xf1iAcspqOtRzDdXNXT43LJyGIamAgdEGlqtk
+          jjjj0lArTkhZFgUg7sfCBfj69gFQX5aGJpCIzCHj1LvorYjMwkC1Lde7BgblCe3K02bnPtIZEzhThuV+aJ90NAeDtX8P+vRjMrnP
+          1OWPyJf/+nMRiRuPcMOgIdScMRBv/Hj8PsZy3B2/D49fxNRolYw/HD+evDN+xMPr3iPjD3jUNORJQm31owwihylAAC0sFjN116CG
+          7wSJDRLvSXZIR0aHoAun2wRgOvz8b6S4GWM/zYkPHl1jnxJHH1fCMeAiWeGCUfIXDWM5NRikQPa/8ogPTs2wHNk0itCMAvGDKQqJ
+          eAblogEM8XZETIIgjY2l8mZ5MySNMEiBH3Y4d6zCFOEOD9a/riN938gRvoX0KJZzx0qLUw14wKHUC9sdsnhp5unjDS2wn2zBlzWG
+          M3v1Rx3OY9PuoVchnIwO9lVMA9JXeE7vDBbM2Kx1fOpxrhjJnOto11OcrUoeCokGuC8ljtQtpRyt+1oOCJYzqCMa8358gWM5bNZW
+          v5pDAomxEsHxK/FY+ZU/dqQYYT3VCrqjnNdS8kcFCXb16zglIA5DZBwVKC/2nu5kYagJKRmU4IKOdPrxCqa7QH9Vg5p9b4AOiCXQ
+          MGUwF75Piur8SqCrCk2tnPA+OszrMb1YQ8+NdRSeaWJMWxr/ErQj9D6+fr7DSVFOEZ3PVNA8tnryWnAaSrRRq9XWa8WwjYwDRBEn
+          uJI6ptCo8lQ2pm+KsXMLs+Vvn5GZsqjXG+12YztqW/Jlvnej0az/WWOnjVz1JGBO6Ro6jJpQ0dm2IFtZx5lSJDrHt3kN/7IJplQh
+          ZIeiVcGA88snhIqyF1dR7pA7YZtsQyn9fPI10Occ6+Rsw4CbGH8EOhG3Ku7bGFRz2Qlz3bnqO41Wxa6Oy/Zjpo5JB7jmwZt5/Gd+
+          /19+/18i/nPx0spKHgCax3/y+E9h2h94f8T6P+X+v1IZ8uLxn8XicimP//x2xX8mrnF7ylDJkacb6jooKksLfhb7NRnXMtUXW42d
+          Kp7dS81psDiU5C1w6yceZXUaIy84bBUrhHf03fA8+2ZzC1A24+GJQQnInZlBBU50SwUd9DAaqbRG5EOwXrJ23f2d6tALPyMCZ8Rp
+          uniYHAyi6zFFf7fZ2N5t4/aZhC7ON9FZ+zEe5kQ/72u+g/Td8RcYR4EO2oeRw514k8H4U3afwQM/2OLB+LPJfXxgld/FSwjwvpLx
+          Q5XXFdcSEHFIe/IGL30XncMI3/emyuyShM9Y6bfR6fo++orx6+v8Dggs/AUe34avbxMwv54wrN5UxMHtoKHYfSoYDAJZr+MX1jQe
+          WVXx+pRP2Onw8HIG//w3dj96Bwsv49/Dwgv8Dj7f8j3jH0Hpe4GHWIzV5C2GSKzZyVvqzOR1VufJ+JNKcIdLhR+g5beijD+Gwr8J
+          /O7M34x54gGP3XKAb3PM3oDc+zg3b4im3oFWZTQhhW8dD1XCKL7JJvnXWI3N9vg9/Pp4ck8RkMYfokec4YmTW1tYKMEo4xucrftY
+          7XV0oc/hBS54Kn76CH2IEzrbOZHUSuUim6/J3Vmo+WD8qd/ApXKRj5Ho5ZOwy4+RrHy8PpncU/lNOI+gM2+BXbKwXMKPMn4s40cR
+          Plbw3UqZ3VXzOe5DsEtZJm/hAGAfawvlMoEXdxkOj8W41Jbmod5SeRm/LfodAKyY9/89H6Ff8knBvQCglbf9+2veACp4iEsIy7Az
+          0WxFvEfYpQMPkfiIP0Pw3h9oKPgmjmfYDBR5wJpieyE4X3dZLTbvn7DdCyBQsR0Tjvd708sOG/lYXJLAly80weCyqeT3Kfg4qcEs
+          VhiF8NkPC7Ee+GizaUfU7odbIg+Azk+7VEGdwaFjjANvaPgdWzViiIN1QfjBXyzwKZ4tx1H0N2r4LQ7YBXHPycg8MK0jk6/NoeYO
+          9i1rwBfiF7g+EArevcJHSiz+ZIt4SQRv8GN4/Q6bjfEHQN+4RcVb+nz8GJB/FycLp+pnBIUCDjfwrQq5LYGh2x11PKkiiTspPsVr
+          aoK9jIrExNqrA3RpvOrj+arAHgp2MKYEf1mLSpXibKlYLEjuaDjUnBME+SFD/X12nVVB6hlav0+7UuXPb0t4rTyUCBc75IMu4Y3c
+          jDYhH4QUiDWE+yn08xGy1M9xgKQ7f1GQPN1GeG+yVx8FXO8RrDsgGemOWAKswH28tOpRcCvAI75xJ0kp8WQdzaDdyJac/yUltKxU
+          Xin2yBzM5nGjJ+/zELIC2RdxY1MRkujvG2LYXKmnkP2UGJkWa1xEyuwXiA8TBOpQCb1nst9C4n14HaNwuUQ3GQ/oSbhFwPa9Its3
+          QzvS31CLSPQZnb2pikTUZSLGb2greOsSD4cOwpH4s3CHvbhbu14gK4sF4ib2IJYWsCWm/ajs11Vo2z+o7UJ3Axyw06LYTmPvpWZ1
+          N7mZwbb/ww4ldv3xJhEM92WaGkbUBaoVv5REjtbkhW3NSZac2pTLqIr6EtTkmoxy7mq6aegm3RN3iE7nD8Ec3cOr33A7lV+J9IpN
+          +5LIFvX28XIoTCkD0MedJh4bywLGUpuBibNBG6N7sfYiv+MwhyqolPBQd2D4QWcMb+by2zqkhmb2R4CtuKNLs3WX3dN1WNqnnjbH
+          SNSdw9PVfAf5B0SqiNpUxMReBaJewxLwX2FXCYSqq8zCw6c12sDXqIorMUAzHVjsdxLx0gspUsClXlNcm8F/7/tElkTLs+3MAYgA
+          6Fp8lYhwkVV41eGYtGEQLZZRRqNulaGjdcPXS/g6AsqKLDdxQ4LuqUeOjtc34h5C9CqD6ApJbmt0+I86Ynt8QvGy2vguDduIkZFb
+          scK6iUiqavnSJQXq6eFtDZyFdVTqOJbDXykiYpB2eVQsoMM6htHL8aBiBvv5GHBvgDsagftWlm6027vsgD0rjBTAnjy8ukE7oHJp
+          qZggOC++3qGkgnEH4XKVwGDr6hh/g6HZIkuULiZWRzzXZxRSEiLnCdPAogEPbPFPSYQopv5dRdyxjUEY+rEs/eQnP+FkJd63YHTF
+          eym4ESnJ8/1ohcNg67dCdjXduewzfBAYV2CgeBjYYdQFz0WxhDv3WCMSq/7lv6RfZ6dE64IAj9XlhgL58p9/nhqUEKkbiP2weqg7
+          ky//6d/+53d/68O4tFItrk/D8MOZROPnDAKaGj0ekxGVg4o/jkmBiEFJPMeP+49Iwn30C1CzGw8a8fUvflUfZkuEyJISK4yIRTWt
+          SOE/JVzhU35s/thMVPPb8BWyxNrosVhsKBehXV9Fi6/Nnn9UB08D9cT+pIwhcFMB0mE3JcRoSkcWL95CQ7iSON7QsxzgM8hgiqAf
+          e7oRaUs55UaaXmKp6SmnZaJoffmz/yDhUFnRoWJqaXQuvvzZz7PKCnVUOfvwjc+JYrOCCmt8mPG+rR3LC67cSozlH37xd/8ewWVa
+          oYTyIdvP96by/Z98/+cb2f/Jf//1O7n/g7/WGfze3Vf1669n/v5rsVReTP7+6/xCOd//eRbpfL//eplRxJXL7OrPWXwg/FcVOxLB
+          pzVJleauXOaEcyVnHHnKU57ylKc85SlPecpTnvKUpzzlKU95ylOe8pSnPOUpT3nKU57ylKc85SlPecpTnvKUpzzlKU9fX/pfobCL
+          rgDIAAA=
+          B64
+          test -f app/build.gradle.kts
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HalalScan-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          
