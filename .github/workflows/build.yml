@@ -1,0 +1,335 @@
+name: Build APK
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Write project
+        run: |
+          mkdir -p app/src/main/java/com/halalscan/app app/src/main/res/xml
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "HalalScan"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.halalscan.app"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.halalscan.app"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <application android:label="حلال سكان" android:theme="@style/Theme.AppCompat.Light.NoActionBar" android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".BubbleService" android:exported="false" android:foregroundServiceType="mediaProjection"/>
+                  <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fp" android:exported="false" android:grantUriPermissions="true">
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/paths"/>
+                  </provider>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/xml/paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?><paths><cache-path name="c" path="."/></paths>
+          EOF
+          cat > app/src/main/java/com/halalscan/app/Gemini.kt <<'EOF'
+          package com.halalscan.app
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.util.Base64
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.io.ByteArrayOutputStream
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          fun Context.dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+          object Gemini {
+              private const val PROMPT = """أنت خبير في الأطعمة الحلال لمسلمين يعيشون في أوروبا. الصورة قد تكون لقطة شاشة (منشور، متجر، قائمة طعام، إعلان) أو صورة منتج أو ملصق مكونات. حدد المنتج أو الأكلة أو المشروب الظاهر واحكم على حلاله من مكوناته.
+          قواعد: حرام: لحم الخنزير والشحم والبيكون، الكحول كمكوّن (إيثانول، نبيذ، بيرة، رم)، الجيلاتين E441 إلا لو بقري/سمك حلال معتمد، الكارمين E120، إل-سيستين E920 من الشعر والريش، الدم. مشبوه: E471 E472 E477 E470 E481 E482 (مصدر مجهول)، E422 جليسرول، E631 E627 E635، المنفحة والإنزيمات، النكهات الطبيعية بحامل كحولي، الجبن بمنفحة حيوانية، لحوم ودجاج غير معتمدة في أوروبا، خلاصة الفانيلا بالكحول. حلال: نباتي بالكامل، السمك، وما عليه شعار حلال معتمد.
+          إن لم تظهر المكونات ولا تستطيع التأكد فاختر unknown أو mashbooh واطلب تصوير ملصق المكونات. لا تخمّن بثقة. اختصر.
+          أجب بـ JSON فقط: {"product":"الاسم","verdict":"halal|haram|mashbooh|unknown","confidence":0-100,"summary":"جملتان","flagged":[{"name":"مكوّن","status":"halal|haram|mashbooh","reason":"سبب قصير"}],"tip":"نصيحة أو بديل"} والنصوص بالعربية."""
+
+              private fun scaled(b: Bitmap): Bitmap {
+                  val m = 1280f / maxOf(b.width, b.height)
+                  return if (m >= 1f) b else Bitmap.createScaledBitmap(b, (b.width * m).toInt(), (b.height * m).toInt(), true)
+              }
+
+              fun analyze(key: String, model: String, bmp: Bitmap): JSONObject {
+                  val s = ByteArrayOutputStream()
+                  scaled(bmp).compress(Bitmap.CompressFormat.JPEG, 85, s)
+                  val b64 = Base64.encodeToString(s.toByteArray(), Base64.NO_WRAP)
+                  val body = JSONObject()
+                      .put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
+                          .put(JSONObject().put("text", PROMPT))
+                          .put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", b64))))))
+                      .put("generationConfig", JSONObject().put("response_mime_type", "application/json"))
+                  val c = URL("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key).openConnection() as HttpURLConnection
+                  c.requestMethod = "POST"
+                  c.setRequestProperty("Content-Type", "application/json")
+                  c.doOutput = true; c.connectTimeout = 20000; c.readTimeout = 60000
+                  c.outputStream.use { it.write(body.toString().toByteArray()) }
+                  val code = c.responseCode
+                  val txt = (if (code in 200..299) c.inputStream else c.errorStream).bufferedReader().readText()
+                  if (code !in 200..299) throw Exception("HTTP " + code + ": " + txt.take(160))
+                  val t = JSONObject(txt).getJSONArray("candidates").getJSONObject(0)
+                      .getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
+                  return JSONObject(t.trim().removePrefix("```json").removeSuffix("```").trim())
+              }
+
+              fun verdict(v: String): Pair<String, Int> = when (v) {
+                  "halal" -> Pair("حلال ✅", 0xFF0F7A55.toInt())
+                  "haram" -> Pair("حرام ⛔", 0xFFC62F2F.toInt())
+                  "mashbooh" -> Pair("مشبوه ⚠️", 0xFFC98A0B.toInt())
+                  else -> Pair("غير واضح ❔", 0xFF6B7A73.toInt())
+              }
+
+              fun body(r: JSONObject): String {
+                  val sb = StringBuilder()
+                  sb.append(r.optString("product")).append("  (").append(r.optInt("confidence")).append("% ثقة)\n\n").append(r.optString("summary"))
+                  val f = r.optJSONArray("flagged")
+                  if (f != null && f.length() > 0) {
+                      sb.append("\n\nالمكونات المهمة:")
+                      for (i in 0 until f.length()) {
+                          val o = f.getJSONObject(i)
+                          sb.append("\n• ").append(o.optString("name")).append(" — ").append(o.optString("reason"))
+                      }
+                  }
+                  val t = r.optString("tip")
+                  if (t.isNotBlank()) sb.append("\n\n💡 ").append(t)
+                  return sb.toString()
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/halalscan/app/MainActivity.kt <<'EOF'
+          package com.halalscan.app
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.graphics.BitmapFactory
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.content.ContextCompat
+          import androidx.core.content.FileProvider
+          import java.io.File
+
+          class MainActivity : AppCompatActivity() {
+              private lateinit var prefs: SharedPreferences
+              private lateinit var keyEt: EditText
+              private lateinit var modelEt: EditText
+              private lateinit var verdictTv: TextView
+              private lateinit var bodyTv: TextView
+              private lateinit var prog: ProgressBar
+              private var camUri: Uri? = null
+
+              private val cam = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok -> if (ok) camUri?.let { run(it) } }
+              private val pick = registerForActivityResult(ActivityResultContracts.GetContent()) { u -> if (u != null) run(u) }
+              private val proj = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                  val d = r.data
+                  if (r.resultCode == RESULT_OK && d != null) {
+                      save()
+                      val i = Intent(this, BubbleService::class.java).putExtra("code", r.resultCode).putExtra("data", d)
+                      ContextCompat.startForegroundService(this, i)
+                      Toast.makeText(this, "اضغط 🌙 فوق أي تطبيق لفحص الشاشة", Toast.LENGTH_LONG).show()
+                      moveTaskToBack(true)
+                  }
+              }
+
+              private fun btn(t: String, bg: Int, fg: Int, f: () -> Unit) = Button(this).apply {
+                  text = t; textSize = 17f; setTextColor(fg); isAllCaps = false
+                  background = GradientDrawable().apply { setColor(bg); cornerRadius = dp(16).toFloat(); if (bg == Color.WHITE) setStroke(dp(1), 0xFFE4E0D4.toInt()) }
+                  layoutParams = LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(10) }
+                  setOnClickListener { f() }
+              }
+
+              private fun field(hint: String, value: String) = EditText(this).apply {
+                  this.hint = hint; setText(value); setSingleLine(); textSize = 15f
+                  background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(14).toFloat(); setStroke(dp(1), 0xFFE4E0D4.toInt()) }
+                  setPadding(dp(14), dp(12), dp(14), dp(12))
+                  layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+              }
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  prefs = getSharedPreferences("p", 0)
+                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(36), dp(20), dp(30)) }
+                  val sv = ScrollView(this).apply { setBackgroundColor(0xFFF6F4EE.toInt()); layoutDirection = View.LAYOUT_DIRECTION_RTL; addView(col) }
+                  col.addView(TextView(this).apply { text = "🌙 حلال سكان"; textSize = 28f; setTextColor(0xFF0B5C41.toInt()); setTypeface(typeface, android.graphics.Typeface.BOLD) })
+                  col.addView(TextView(this).apply { text = "افحص أي منتج أو أكلة أو مشروب: حلال أم حرام؟"; textSize = 14f; setTextColor(0xFF6B7A73.toInt()) })
+                  keyEt = field("مفتاح Gemini API (مجاني)", prefs.getString("key", "") ?: "")
+                  modelEt = field("اسم النموذج", prefs.getString("model", "gemini-flash-latest") ?: "gemini-flash-latest")
+                  col.addView(keyEt)
+                  col.addView(TextView(this).apply {
+                      text = "احصل على مفتاح مجاني: aistudio.google.com/apikey"; textSize = 13f; setTextColor(0xFF0F7A55.toInt()); setPadding(0, dp(6), 0, dp(4))
+                      setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey"))) }
+                  })
+                  col.addView(modelEt)
+                  col.addView(btn("🌙  تشغيل الزر العائم", 0xFF0F7A55.toInt(), Color.WHITE) { startBubble() }.apply { layoutParams = LinearLayout.LayoutParams(-1, dp(64)).apply { topMargin = dp(20) } })
+                  col.addView(btn("📷  صوّر المنتج", Color.WHITE, 0xFF1B2A24.toInt()) { shoot() })
+                  col.addView(btn("🖼️  اختر صورة", Color.WHITE, 0xFF1B2A24.toInt()) { pick.launch("image/*") })
+                  prog = ProgressBar(this).apply { visibility = View.GONE }
+                  col.addView(prog)
+                  verdictTv = TextView(this).apply {
+                      textSize = 22f; setTextColor(Color.WHITE); gravity = Gravity.CENTER; visibility = View.GONE; setPadding(dp(12), dp(10), dp(12), dp(10))
+                      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) }
+                  }
+                  bodyTv = TextView(this).apply { textSize = 15f; setTextColor(0xFF1B2A24.toInt()); setPadding(dp(4), dp(10), dp(4), 0); setLineSpacing(0f, 1.3f) }
+                  col.addView(verdictTv); col.addView(bodyTv)
+                  col.addView(TextView(this).apply { text = "النتائج بالذكاء الاصطناعي وقد تخطئ. للتأكد ابحث عن شعار حلال معتمد أو اسأل مرجعك الشرعي."; textSize = 12f; setTextColor(0xFF6B7A73.toInt()); setPadding(0, dp(24), 0, 0) })
+                  setContentView(sv)
+              }
+
+              private fun save() { prefs.edit().putString("key", keyEt.text.toString().trim()).putString("model", modelEt.text.toString().trim().ifEmpty { "gemini-flash-latest" }).apply() }
+
+              private fun shoot() {
+                  val f = File.createTempFile("shot", ".jpg", cacheDir)
+                  camUri = FileProvider.getUriForFile(this, packageName + ".fp", f)
+                  cam.launch(camUri)
+              }
+
+              private fun startBubble() {
+                  if (keyEt.text.isBlank()) { Toast.makeText(this, "ضع مفتاح Gemini أولاً", Toast.LENGTH_LONG).show(); return }
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "فعّل «العرض فوق التطبيقات» لحلال سكان ثم ارجع", Toast.LENGTH_LONG).show()
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + packageName))); return
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  proj.launch(getSystemService(MediaProjectionManager::class.java).createScreenCaptureIntent())
+              }
+
+              private fun run(u: Uri) {
+                  save()
+                  val key = keyEt.text.toString().trim()
+                  if (key.isEmpty()) { Toast.makeText(this, "ضع مفتاح Gemini أولاً", Toast.LENGTH_LONG).show(); return }
+                  prog.visibility = View.VISIBLE; verdictTv.visibility = View.GONE; bodyTv.text = "جاري التحليل…"
+                  Thread {
+                      try {
+                          val o = BitmapFactory.Options().apply { inSampleSize = 2 }
+                          val bmp = contentResolver.openInputStream(u).use { BitmapFactory.decodeStream(it, null, o) }!!
+                          val r = Gemini.analyze(key, modelEt.text.toString().trim(), bmp)
+                          val v = Gemini.verdict(r.optString("verdict"))
+                          runOnUiThread {
+                              prog.visibility = View.GONE
+                              verdictTv.text = v.first
+                              verdictTv.background = GradientDrawable().apply { setColor(v.second); cornerRadius = dp(16).toFloat() }
+                              verdictTv.visibility = View.VISIBLE
+                              bodyTv.text = Gemini.body(r)
+                          }
+                      } catch (e: Exception) {
+                          runOnUiThread { prog.visibility = View.GONE; bodyTv.text = "خطأ: " + e.message }
+                      }
+                  }.start()
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/halalscan/app/BubbleService.kt <<'EOF'
+          package com.halalscan.app
+
+          import android.annotation.SuppressLint
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import kotlin.math.abs
+
+          class BubbleService : Service() {
+              private lateinit var wm: WindowManager
+              private var bubble: View? = null
+              private var panel: View? = null
+              private var proj: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var ir: ImageReader? = null
+              @Volatile private var latest: Bitmap? = null
+              private var lastConv = 0L
+              private val h = Handler(Looper.getMainLooper())
+              private var sw = 0
+              private var sh = 0
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              @Suppress("DEPRECATION")
+              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+                  startFg()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  if (proj == null && i != null) {
+                      val d = i.getParcelableExtra<Intent>("data")
+                      if (d != null) {
+                          val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                          proj = mpm.getMediaProjection(i.getIntExtra("code", 0), d)
+                          proj?.registerCallback(object : MediaProjection.Callback() { override fun onStop() { stopSelf() } }, h)
+                          setupCapture()
+           
